@@ -8,7 +8,7 @@ DigitalOut led2(LED2);
 
 static BufferedSerial pc(USBTX, USBRX, 115200);
 
-SHELL_PARAMETER_INT(ID, "ID_motor", 141)
+SHELL_PARAMETER_INT(ID, "ID_motor", 321)
 
 void send() {
     char command[8];
@@ -21,7 +21,7 @@ void send() {
     command[6] = '\x00';
     command[7] = '\x00';
 
-    CANMessage s_msg = CANMessage('\x8D', command, 8);
+    CANMessage s_msg = CANMessage(ID, command, 8, CANData, CANStandard);
 
     if (can.write(s_msg)) {
         shell_print("Message sent:");
@@ -36,11 +36,11 @@ void send() {
         shell_print(s_msg.data[6]);
         shell_print(s_msg.data[7]);
         shell_println();
-        // pc.write(s_msg.data[0],1);
-        // pc.write(s_msg.data,1);
+
+        led3 = !led3;
     } 
 
-    led3 = !led3;
+
 }
 
 SHELL_COMMAND(send, "Send")
@@ -55,11 +55,18 @@ int main() {
     while(1){
         if(can.read(msg)) {
             shell_print("Message received:");
-            // shell_print(msg.data);
-            // shell_println();
-            led2 = !led2;
+            shell_print(msg.data[0]);
+            shell_print(msg.data[1]);
+            shell_print(msg.data[2]);
+            shell_print(msg.data[3]);
+            shell_print(msg.data[4]);
+            shell_print(msg.data[5]);
+            shell_print(msg.data[6]);
+            shell_print(msg.data[7]);
+            shell_println();
+            led3 = !led3;
         }
-        ThisThread::sleep_for(500ms);
+         ThisThread::sleep_for(200ms);
 
     }
 

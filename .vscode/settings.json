@@ -20,6 +20,7 @@
         "type_traits": "cpp",
         "utility": "cpp",
         "cmath": "cpp",
-        "mstd_iterator": "cpp"
+        "mstd_iterator": "cpp",
+        "vector": "cpp"
     }
 }

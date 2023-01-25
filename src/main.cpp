@@ -1,10 +1,20 @@
 #include "mbed.h"
 #include "shell.h"
 
+#define ENCODER_MAX 65535
+
 using namespace std::chrono;
 
 CAN can(PA_11, PA_12,1000000); // RX, TX, baud rate
 DigitalOut led3(LED3);
+
+struct frame
+{ 
+  uint8_t head[2];
+  uint16_t ts;
+  int16_t current;
+  int32_t pos;
+}__attribute__((packed, aligned(1)));
 
 static BufferedSerial pc(USBTX, USBRX, 921600);
 
@@ -37,7 +47,7 @@ CANMessage send_cmd(CANMessage cmd){
 
     if (can.write(cmd)) {
         t.start();
-    } 
+    }
 
     while(1){
         if(can.read(rcv_msg)) {
@@ -69,7 +79,10 @@ uint32_t read_data_4byte(CANMessage rcv_msg){
     return data;
 }
 
-uint32_t read_data_6byte_signed(CANMessage rcv_msg){
+/// @brief Convert 6bits signed data from CAN received message (6*uint8_t + 1uint8_t for the sign) to a unique int64_t
+/// @param rcv_msg CANMessage to convert
+/// @return data from CANMessage under uint32_t format
+int64_t read_data_6byte_signed(CANMessage rcv_msg){
     uint8_t data0 = rcv_msg.data[1];
     uint8_t data1 = rcv_msg.data[2];
     uint8_t data2 = rcv_msg.data[3];
@@ -89,6 +102,25 @@ uint32_t read_data_6byte_signed(CANMessage rcv_msg){
 
     return data;
 }
+
+/// @brief Takes two values (actual and previous one) of the one-turn  motor encoder to know if the motor output shaft (after reduction) passed to the next part
+/// @param a actual encoder value
+/// @param b precedent encoder value
+/// @return 0 if in the same part of the motor output shaft | 1 if it has passed to the next one | -1 if it has passed on the previous one
+int angle_rel2abs(int a, int b){
+    int d=b-a;
+    if (abs(d)<ENCODER_MAX/2)
+    {
+      return 0;
+    }
+    else if (b>a){
+      return 1;
+    }
+    else 
+      return -1;
+
+}
+
 
 /// @brief Read PID parameters of the selected Motor
 /// @param ID ID of the choosen Motor (1~32)
@@ -161,7 +193,7 @@ void read_abs_angle(int ID) {
 
     shell_print("Absolute angle position (°) :");
 
-    shell_print((int64_t)read_data_6byte_signed(rcv_msg));
+    shell_print((float)read_data_6byte_signed(rcv_msg)/100/6,3);
     shell_println();
 }
 
@@ -378,13 +410,13 @@ void stop_motor(int ID) {
     }
 }
 
-/// @brief Resume the selected Motor - recover the control mode before the stop
+/// @brief Start/Resume the selected Motor - recover the control mode before the stop
 /// @param ID ID of the choosen Motor (1~32)
-void resume_motor(int ID) {
+void start_motor(int ID) {
     CANMessage cmd = build_can_cmd(ID,'\x88');
     CANMessage rcv_msg = send_cmd(cmd);
     if (rcv_msg.data[0] == '\x88'){
-        shell_print("Resume command sent");
+        shell_print("Start/Resume command sent");
         shell_println();
     }
 }
@@ -411,25 +443,74 @@ void brake_motor(int ID) {
     }
 }
 
+/// @brief Reset the selected Motor
+/// @param ID ID of the choosen Motor (1~32)
+void reset_motor(int ID) {
+    CANMessage cmd = build_can_cmd(ID,'\x76');
+    CANMessage rcv_msg = send_cmd(cmd);
+    if (rcv_msg.data[0] == '\x76'){
+        shell_print("Reset command sent");
+        shell_println();
+    }
+}
+
+/// @brief Read the power consumption of the selected Motor (Strange value for now....)
+/// @param ID ID of the choosen Motor (1~32)
+void read_motor_power(int ID) {
+    CANMessage cmd = build_can_cmd(ID,'\x71');
+    CANMessage rcv_msg = send_cmd(cmd);
+
+    uint8_t power0 = rcv_msg.data[6];
+    uint8_t power1 = rcv_msg.data[7];
+    uint16_t power = (power1 << 8) | power0;
+
+    shell_print("Power (W):");
+    shell_print(power/10);
+    shell_println();
+}
+
+/// @brief Read the motor mode (Power-on initialization state or Current, Speed or Position Loop)
+/// @param ID ID of the choosen Motor (1~32)
+void read_motor_mode(int ID) {
+    CANMessage cmd = build_can_cmd(ID,'\x70');
+    CANMessage rcv_msg = send_cmd(cmd);
+    if (rcv_msg.data[0] == '\x70'){
+        switch(rcv_msg.data[7])
+            {
+                case '\x00':
+                    shell_print("Current loop mode");
+                    shell_println();  
+                    break;
+                case '\x01':
+                    shell_print("Speed loop mode");
+                    shell_println();  
+                    break;
+                case '\x02' :
+                    shell_print("Position loop mode");
+                    shell_println();  
+                    break;
+                case '\xFF' :
+                    shell_print("Power-on initialization state, not in three-ring mode");
+                    shell_println();  
+                    break;
+            }
+    }
+}
+
 /// @brief Send Torque closed-loop command (-32A~32A) to the selected Motor
 /// @param ID ID of the choosen Motor (1~32)
 void torque_cmd(int ID, float torque_raw) {
     int torque = round((torque_raw*2000)/32);
-    shell_print(torque);
     uint8_t byte0 = torque & 255;
     uint8_t byte1 = (torque >> 8);
     CANMessage cmd = build_can_cmd(ID,'\xA1','\x00','\x00','\x00', byte0, byte1);
     CANMessage rcv_msg = send_cmd(cmd);
-    if (rcv_msg.data[0] == '\xA1' && rcv_msg.data[6] == '\x00'){
-        shell_print("Torque command sent");
+    if (rcv_msg.data[0] == '\xA1'){
+        shell_print("Torque command sent : ");
+        shell_print(torque_raw);
+        shell_print("A");
         shell_println();
-    }
-    else if (rcv_msg.data[0] == '\xA1' && rcv_msg.data[1] == '\x00' && rcv_msg.data[2] == '\x00' && rcv_msg.data[3] == '\x00' 
-        && rcv_msg.data[4] == '\x00' && rcv_msg.data[5] == '\x00' && (rcv_msg.data[6] == '\xF6' || rcv_msg.data[6] == '\xF2')){
-        shell_print("MotorError : three-loop operation error, switching to the current-loop safe state");
-        shell_println();
-    }
-    else{
+
         shell_print("Temperature (°C):");
         shell_print((int)rcv_msg.data[1]);
         shell_println();
@@ -458,14 +539,18 @@ void torque_cmd(int ID, float torque_raw) {
         shell_print(pos);
         shell_println();
     }
+
+    if (rcv_msg.data[0] == '\xA1' && rcv_msg.data[1] == '\x00' && rcv_msg.data[2] == '\x00' && rcv_msg.data[3] == '\x00' 
+        && rcv_msg.data[4] == '\x00' && rcv_msg.data[5] == '\x00' && (rcv_msg.data[6] == '\xF6' || rcv_msg.data[6] == '\xF2')){
+        shell_print("MotorError : three-loop operation error, switching to the current-loop safe state");
+        shell_println();
+    }
 }
 
 /// @brief Send Speed closed-loop command to the selected Motor
 /// @param ID ID of the choosen Motor (1~32)
 void speed_cmd(int ID, int32_t speed_raw) {
-    int32_t speed = speed_raw*100;
-    shell_print((int)speed);
-    shell_println();
+    int32_t speed = speed_raw*100*6; // 0.01°/s et ratio 1:6
     uint8_t byte0 = speed & 255;
     uint8_t byte1 = (speed >> 8);
     byte1 = byte1 & 255;
@@ -476,16 +561,12 @@ void speed_cmd(int ID, int32_t speed_raw) {
     CANMessage cmd = build_can_cmd(ID,'\xA2','\x00','\x00', '\x00', byte0, byte1, byte2, byte3);
     CANMessage rcv_msg = send_cmd(cmd);
     
-    if (rcv_msg.data[0] == '\xA1' && rcv_msg.data[6] == '\x00'){
-        shell_print("Speed command sent");
+    if (rcv_msg.data[0] == '\xA2'){
+        shell_print("Speed command sent : ");
+        shell_print((int)speed_raw);
+        shell_print("°/s");
         shell_println();
-    }
-    else if (rcv_msg.data[0] == '\xA1' && rcv_msg.data[1] == '\x00' && rcv_msg.data[2] == '\x00' && rcv_msg.data[3] == '\x00' 
-        && rcv_msg.data[4] == '\x00' && rcv_msg.data[5] == '\x00' && (rcv_msg.data[6] == '\xF6' || rcv_msg.data[6] == '\xF2')){
-        shell_print("MotorError : three-loop operation error, switching to the current-loop safe state");
-        shell_println();
-    }
-    else{
+
         shell_print("Temperature (°C):");
         shell_print((int)rcv_msg.data[1]);
         shell_println();
@@ -512,6 +593,12 @@ void speed_cmd(int ID, int32_t speed_raw) {
 
         shell_print("Encoder position relative to zero position value (pulses):");
         shell_print(pos);
+        shell_println();
+    }
+
+    if (rcv_msg.data[0] == '\xA2' && rcv_msg.data[1] == '\x00' && rcv_msg.data[2] == '\x00' && rcv_msg.data[3] == '\x00' 
+        && rcv_msg.data[4] == '\x00' && rcv_msg.data[5] == '\x00' && (rcv_msg.data[6] == '\xF6' || rcv_msg.data[6] == '\xF2')){
+        shell_print("MotorError : three-loop operation error, switching to the current-loop safe state");
         shell_println();
     }
 }
@@ -657,12 +744,12 @@ SHELL_COMMAND(brake, "Brake the selected Motor")
   }
 }
 
-SHELL_COMMAND(resume, "Resume the selected Motor - recover the control mode before the stop")
+SHELL_COMMAND(start, "Start/Resume the selected Motor - recover the control mode before the stop")
 {
   if (argc > 0) {
-    resume_motor(atoi(argv[0]));
+    start_motor(atoi(argv[0]));
   } else {
-    shell_print("Usage: resume [Motor ID (1~32)]");
+    shell_print("Usage: start [Motor ID (1~32)]");
     shell_println();
   }
 }
@@ -686,6 +773,93 @@ SHELL_COMMAND(speed_cmd, "Send Speed closed-loop command (°/s)")
     shell_println();
   }
 }
+
+SHELL_COMMAND(read_mode, "Read the motor mode (Power-on initialization state or Current, Speed or Position Loop)")
+{
+  if (argc > 0) {
+    read_motor_mode(atoi(argv[0]));
+  } else {
+    shell_print("Usage: read_mode [Motor ID (1~32)]");
+    shell_println();
+  }
+}
+
+SHELL_COMMAND(reset, "Reset motor")
+{
+  if (argc > 0) {
+    reset_motor(atoi(argv[0]));
+  } else {
+    shell_print("Usage: reset [Motor ID (1~32)]");
+    shell_println();
+  }
+}
+
+SHELL_COMMAND(read_power, "Read the motor power consumption (Strange value for now....)")
+{
+  if (argc > 0) {
+    read_motor_power(atoi(argv[0]));
+  } else {
+    shell_print("Usage: read_power [Motor ID (1~32)]");
+    shell_println();
+  }
+}
+
+
+// Commands for Aquisition program
+
+/// @brief Acquisition program
+void acquisition() {
+
+    frame f;
+    f.head[0]=0xff;
+    f.head[1]=0xaa;
+
+    Timer t;
+    t.start();
+
+    CANMessage cmd = build_can_cmd(1,'\x9C');
+    CANMessage rcv_msg_init = send_cmd(cmd);
+    uint8_t pos0 = rcv_msg_init.data[6];
+    uint8_t pos1 = rcv_msg_init.data[7];
+    uint16_t old_pos = (pos1 << 8) | pos0;
+
+    int tour = 0;
+    int t_old = duration_cast<microseconds>(t.elapsed_time()).count();
+
+    for (size_t i = 0; i < 4000; i++)
+    {
+        
+        CANMessage rcv_msg = send_cmd(cmd);
+
+        uint8_t current0 = rcv_msg.data[2];
+        uint8_t current1 = rcv_msg.data[3];
+        int16_t current = (current1 << 8) | current0;
+
+        uint8_t pos0 = rcv_msg.data[6];
+        uint8_t pos1 = rcv_msg.data[7];
+        uint16_t pos = (pos1 << 8) | pos0;
+
+        tour += angle_rel2abs(pos, old_pos);
+        old_pos = pos;
+        int32_t pos_multitour = ((float)pos+tour*65535); // *360/65535/6
+
+        f.current = current;
+        f.pos = pos_multitour;
+        f.ts = duration_cast<microseconds>(t.elapsed_time()).count()-t_old;
+
+        t_old = duration_cast<microseconds>(t.elapsed_time()).count();
+        pc.write(&f,10);
+    }
+    t.stop();
+}
+
+
+SHELL_COMMAND(exp, "For aquisition program")
+{
+    acquisition();
+}
+
+
 
 
 int main() {

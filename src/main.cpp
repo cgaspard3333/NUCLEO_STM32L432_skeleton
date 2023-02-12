@@ -11,12 +11,12 @@ DigitalOut led3(LED3);
 struct frame
 { 
   uint8_t head[2];
-  uint16_t ts;
+  uint32_t ts;
   int16_t current;
   int32_t pos;
 }__attribute__((packed, aligned(1)));
 
-static BufferedSerial pc(USBTX, USBRX, 921600);
+static BufferedSerial pc(USBTX, USBRX, 576000);
 
 /// @brief Transforms Motor ID + Data into CANMessage (autocomplete data field by zeros)
 /// @param ID Motor ID (1~32)
@@ -823,33 +823,54 @@ void acquisition() {
     uint8_t pos1 = rcv_msg_init.data[7];
     uint16_t old_pos = (pos1 << 8) | pos0;
 
+    int LO=-45;
+    int HI=45;
+    size_t nb_exp = 20000;
+
     int tour = 0;
-    int t_old = duration_cast<microseconds>(t.elapsed_time()).count();
+    // int t_old = duration_cast<microseconds>(t.elapsed_time()).count();
 
-    for (size_t i = 0; i < 4000; i++)
+    for (size_t i = 0; i < nb_exp; i++)
     {
-        
+        std::srand(duration_cast<microseconds>(t.elapsed_time()).count());
         CANMessage rcv_msg = send_cmd(cmd);
+        if (!(i % 1000)){
+            int torque = LO + rand()/(RAND_MAX/(HI-LO));
+            uint8_t byte0 = torque & 255;
+            uint8_t byte1 = (torque >> 8);
+            CANMessage cmd_torque = build_can_cmd(1,'\xA1','\x00','\x00','\x00', byte0, byte1);
+            CANMessage rcv_msg2 = send_cmd(cmd_torque);
 
-        uint8_t current0 = rcv_msg.data[2];
-        uint8_t current1 = rcv_msg.data[3];
-        int16_t current = (current1 << 8) | current0;
+        }
+        if (i == nb_exp-1){
+            CANMessage cmd_torque_stop = build_can_cmd(1,'\xA1','\x00','\x00','\x00', '\x00','\x00');
+            CANMessage rcv_msg2 = send_cmd(cmd_torque_stop);
 
-        uint8_t pos0 = rcv_msg.data[6];
-        uint8_t pos1 = rcv_msg.data[7];
-        uint16_t pos = (pos1 << 8) | pos0;
+        }
+        if (rcv_msg.data[0] == '\x9C')
+        {
+            uint8_t current0 = rcv_msg.data[2];
+            uint8_t current1 = rcv_msg.data[3];
+            int16_t current = (current1 << 8) | current0;
 
-        tour += angle_rel2abs(pos, old_pos);
-        old_pos = pos;
-        int32_t pos_multitour = ((float)pos+tour*65535); // *360/65535/6
+            uint8_t pos0 = rcv_msg.data[6];
+            uint8_t pos1 = rcv_msg.data[7];
+            uint16_t pos = (pos1 << 8) | pos0;
 
-        f.current = current;
-        f.pos = pos_multitour;
-        f.ts = duration_cast<microseconds>(t.elapsed_time()).count()-t_old;
+            tour += angle_rel2abs(pos, old_pos);
+            old_pos = pos;
+            int32_t pos_multitour = ((float)pos+tour*65535); // *360/65535/6
 
-        t_old = duration_cast<microseconds>(t.elapsed_time()).count();
-        pc.write(&f,10);
+            f.current = current;
+            f.pos = pos_multitour;
+            f.ts = duration_cast<microseconds>(t.elapsed_time()).count();
+
+            // t_old = duration_cast<microseconds>(t.elapsed_time()).count();
+            pc.write(&f,12);
+        }
+
     }
+    
     t.stop();
 }
 
@@ -858,9 +879,6 @@ SHELL_COMMAND(exp, "For aquisition program")
 {
     acquisition();
 }
-
-
-
 
 int main() {
     shell_init(&pc);
